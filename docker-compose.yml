@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  scraper:
+    build: .
+    volumes:
+      # Volume para os arquivos de saída
+      - ./output:/app/output
+      # Volumes para desenvolvimento (código-fonte)
+      - ./main.py:/app/main.py
+      - ./viva_real:/app/viva_real
+      - ./requirements.txt:/app/requirements.txt
+    environment:
+      - PYTHONUNBUFFERED=1
+    # O comando padrão pode ser sobrescrito via linha de comando:
+    # docker-compose run --rm scraper --only-links --paginas 1
