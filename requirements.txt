@@ -6,3 +6,4 @@ parsel==1.8.1
 Twisted==23.10.0
 service-identity==23.1.0
 playwright==1.55.0
+google-cloud-storage

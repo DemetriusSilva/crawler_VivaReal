@@ -1,3 +1,6 @@
+import glob
+import os
+from google.cloud import storage
 import logging
 import asyncio
 from datetime import datetime
@@ -26,6 +29,33 @@ async def extrair_dados_link_async(link: str, headless: bool = True, out_dir: st
     scraper = VivaRealScraper(csv_path=csv_path, headless=headless)
     return await scraper.scrape_link(link)
 
+def upload_to_bucket(source_folder, bucket_name, destination_blob_folder):
+    """Sobe todo o conteúdo de output para o Bucket no GCS."""
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+
+        # Pega todos os arquivos recursivamente
+        files = glob.glob(f"{source_folder}/**/*", recursive=True)
+
+        count = 0
+        print(f"\nIniciando upload para gs://{bucket_name}/{destination_blob_folder}...")
+
+        for file_path in files:
+            if os.path.isfile(file_path):
+                # Mantém a estrutura de pastas (ex: links/arquivo.csv)
+                relative_path = os.path.relpath(file_path, source_folder)
+                blob_path = os.path.join(destination_blob_folder, relative_path)
+
+                blob = bucket.blob(blob_path)
+                blob.upload_from_filename(file_path)
+                print(f" - Upload: {relative_path}")
+                count += 1
+
+        print(f"Upload concluído! Total de arquivos: {count}")
+    except Exception as e:
+        print(f"ERRO ao fazer upload para o Bucket: {e}")
+
 if __name__ == "__main__":
     import argparse
     
@@ -36,6 +66,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-headless", action="store_true", help="Executar com UI do navegador para debug")
     parser.add_argument("--out-dir", default="output", help="Diretório base para arquivos de saída")
     parser.add_argument("--url-base", type=str, help="URL base para busca (ex: https://www.vivareal.com.br/venda/sp/sao-paulo/apartamento_residencial/)")
+    parser.add_argument("--bucket", type=str, help="Nome do Bucket GCS para salvar os resultados (ex: meu-bucket-vivareal)")
     args = parser.parse_args()
     
     if args.link:
@@ -80,3 +111,12 @@ if __name__ == "__main__":
             print(f"Dados salvos em: {dados_csv}")
         else:
             print("\nFalha na execução do pipeline")
+
+    # Fazer upload para o Bucket se especificado
+        if args.bucket:
+            folder_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+            upload_to_bucket(
+                source_folder=args.out_dir,
+                bucket_name=args.bucket,
+                destination_blob_folder=f"execucao_{folder_date}"
+            )    
