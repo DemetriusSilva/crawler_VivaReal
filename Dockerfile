@@ -3,14 +3,12 @@ FROM python:3.12-slim
 # Evita interação com usuário durante instalação
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Instala dependências necessárias para o Playwright
+# Instala dependências necessárias para o Playwright e Xvfb
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    # Dependências básicas
     wget \
     ca-certificates \
     gnupg \
-    # Dependências gráficas
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -33,33 +31,33 @@ RUN apt-get update && \
     libxfixes3 \
     libxrandr2 \
     libxshmfence1 \
+    # Adicionado xauth aqui
     xvfb \
-    # Limpa o cache do apt
+    xauth \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Define o diretório de trabalho
 WORKDIR /app
 
-# Copia os arquivos do projeto
+# Copia arquivos
 COPY requirements.txt .
 COPY main.py .
 COPY viva_real ./viva_real
 
-# Instala as dependências Python
+# Instala dependências Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Instala os navegadores do Playwright (com dependências do sistema)
+# Instala browsers
 RUN python -m playwright install-deps chromium \
     && python -m playwright install chromium
 
-# Cria diretórios necessários e ajusta permissões
+# Cria diretórios
 RUN mkdir -p output/links output/dados \
     && chmod -R 777 /app/output
 
-# Define as variáveis de ambiente
 ENV PYTHONUNBUFFERED=1
 
-# Comando padrão (pode ser sobrescrito no docker-compose ou na linha de comando)
-ENTRYPOINT ["python", "main.py"]
-CMD ["--paginas", "5"]
+# ENTRYPOINT ATUALIZADO:
+# --auto-servernum: Evita conflito se o ID 99 já estiver em uso
+# -ac: Desativa controle de acesso (Access Control) para evitar erro de permissão no Xauth
+ENTRYPOINT ["sh", "-c", "xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24 -ac' python main.py --no-headless \"$@\"", "--"]

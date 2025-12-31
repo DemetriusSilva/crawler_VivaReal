@@ -2,285 +2,185 @@ import csv
 import os
 import logging
 import asyncio
+import random
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from viva_real.utils.functions_utils import parse_endereco
 import json
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
+from playwright_stealth import Stealth
+from google.cloud import storage
 
 logger = logging.getLogger(__name__)
 
 class VivaRealScraper:
-    def __init__(self, csv_path: Optional[str] = None, headless: bool = True):
-        """Inicializa o scraper e define o CSV de saída.
-        
-        Args:
-            csv_path: Caminho para o arquivo CSV de saída. Se None, usa um nome padrão.
-            headless: Se True, executa o navegador em modo headless.
-        """
+    def __init__(self, csv_path: Optional[str] = None, headless: bool = False):
         if csv_path is None:
             data_capt = datetime.now().strftime("%Y%m%d")
             self.csv_path = f"output/dados/{data_capt}_vivareal.csv"
         else:
             self.csv_path = csv_path
-            
         self.headless = headless
+        self.bucket_name = os.environ.get("GCS_BUCKET_NAME")
 
-        # Define as colunas do CSV
-        # CSV fields - inclui componentes de endereço mapeados e características separadas
         self.fields = [
             "nome_anunciante", "tipo_transacao", "preco_venda", "endereco",
             "logradouro", "numero", "bairro", "municipio", "uf",
             "metragem", "quartos", "banheiros", "suites", "vagas", "outros", "caracteristicas",
             "latitude", "longitude", "condominio", "iptu", "qtd_imagens", "urls_imagens", "data_extracao", "link"
         ]
-        
         self._ensure_output_dir()
-
-        # Se o CSV não existe, cria com cabeçalho
+        
+        # MUDANÇA 1: encoding="utf-8-sig" para o Excel ler acentos corretamente
         if not os.path.exists(self.csv_path):
-            with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+            with open(self.csv_path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.DictWriter(f, fieldnames=self.fields)
                 writer.writeheader()
     
     def _ensure_output_dir(self) -> None:
-        """Garante que o diretório de saída existe."""
         os.makedirs(os.path.dirname(self.csv_path), exist_ok=True)
     
+    def _upload_live_debug(self, file_path: str):
+        if not self.bucket_name or not os.path.exists(file_path): return
+        try:
+            client = storage.Client()
+            bucket = client.bucket(self.bucket_name)
+            blob_name = f"debug_live/{os.path.basename(file_path)}"
+            bucket.blob(blob_name).upload_from_filename(file_path)
+        except: pass
+
     async def _setup_browser(self, playwright) -> Browser:
-        """Configura e retorna uma instância do navegador."""
-        browser = await playwright.chromium.launch(
-            headless=self.headless,
+        return await playwright.chromium.launch(
+            headless=self.headless, 
             args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-dev-shm-usage"
+                "--disable-blink-features=AutomationControlled", 
+                "--no-sandbox", 
+                "--disable-gpu", 
+                "--disable-dev-shm-usage", 
+                "--window-size=1920,1080", 
+                "--start-maximized",
+                "--ignore-certificate-errors"
             ]
         )
-        return browser
 
     async def _setup_context(self, browser: Browser) -> BrowserContext:
-        """Configura e retorna um novo contexto de navegação."""
         return await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1366, "height": 768},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
             java_script_enabled=True,
             locale="pt-BR",
+            timezone_id="America/Sao_Paulo",
+            extra_http_headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-User": "?1"
+            }
         )
 
-    async def _safe_text(self, page: Page, selector: str) -> Optional[str]:
-        """Extrai texto de um elemento de forma segura."""
-        el = page.locator(selector)
-        if await el.count() > 0:
-            return await el.inner_text()
-        return None
+    async def _human_behavior(self, page: Page):
+        try:
+            try:
+                await page.locator("button:has-text('Aceitar'), button:has-text('Prosseguir')").click(timeout=2000)
+            except: pass
+            await page.mouse.move(random.randint(100, 500), random.randint(100, 500), steps=20)
+            await asyncio.sleep(0.5)
+            await page.mouse.wheel(0, 300)
+        except: pass
 
-    async def extrair_caracteristicas(self, page: Page) -> Dict[str, Any]:
-        """Extrai características do imóvel e organiza em colunas específicas.
+    async def _safe_text(self, page, selector):
+        el = page.locator(selector).first
+        # MUDANÇA 2: .strip() aqui ajuda a limpar espaços em branco extras (ex: quebras de linha no preço)
+        text = await el.inner_text() if await el.count() > 0 else None
+        return text.strip() if text else None
 
-        Retorna um dict com chaves: metragem, quartos, banheiros, suites, vagas, outros (lista), caracteristicas (lista completa).
-        """
-        elementos = page.locator(".amenities-item-text")
-        count = await elementos.count()
-        caracteristicas: List[str] = []
-        for i in range(count):
-            texto = await elementos.nth(i).inner_text()
-            if texto:
-                caracteristicas.append(texto.strip())
-
-        lower = [c.lower() for c in caracteristicas]
-
-        def _find(pred):
-            for idx, c in enumerate(lower):
-                if pred(c):
-                    return caracteristicas[idx]
+    async def extrair_caracteristicas(self, page):
+        els = await page.locator(".amenities-item-text, [data-testid='amenities-item']").all_inner_texts()
+        lower = [c.lower() for c in els]
+        def _f(p): 
+            for i,c in enumerate(lower): 
+                if p(c): return els[i]
             return None
-
-        metragem = _find(lambda x: "m²" in x or "m2" in x)
-        quartos = _find(lambda x: "quarto" in x)
-        banheiros = _find(lambda x: "banheiro" in x)
-        suites = _find(lambda x: "suíte" in x or "suite" in x or "suítes" in x)
-        vagas = _find(lambda x: "vaga" in x)
-
-        classificados = {metragem, quartos, banheiros, suites, vagas}
-        outros = [c for c in caracteristicas if c not in classificados]
-
         return {
-            "metragem": metragem,
-            "quartos": quartos,
-            "banheiros": banheiros,
-            "suites": suites,
-            "vagas": vagas,
-            "outros": outros,
-            "caracteristicas": caracteristicas,
+            "metragem": _f(lambda x: "m²" in x or "m2" in x),
+            "quartos": _f(lambda x: "quarto" in x),
+            "banheiros": _f(lambda x: "banheiro" in x),
+            "suites": _f(lambda x: "suíte" in x or "suite" in x),
+            "vagas": _f(lambda x: "vaga" in x),
+            "outros": [c for c in els if "m²" not in c.lower() and "quarto" not in c.lower() and "banheiro" not in c.lower() and "vaga" not in c.lower()],
+            "caracteristicas": els
         }
-
-    def _extract_coordinates(self, iframe_src: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-        """Extrai coordenadas do src do iframe do mapa."""
-        if iframe_src and "q=" in iframe_src:
-            coords = iframe_src.split("q=")[-1].split("&")[0]
-            return coords.split(",")
-        return None, None
 
     async def _extract_data(self, page: Page, link: str) -> Dict[str, Any]:
-        """Extrai todos os dados de uma página de anúncio."""
-        # Extrai características detalhadas (metragem, quartos, banheiros, suites, vagas, outros)
-        parsed_features = await self.extrair_caracteristicas(page)
-        caracteristicas_lista = parsed_features.get("caracteristicas", [])
+        feats = await self.extrair_caracteristicas(page)
+        
+        nome = await self._safe_text(page, 'a[data-testid="official-store-redirect-link"], .publisher-name')
+        preco = await self._safe_text(page, "div.price-info__values-sale .value-item__value, [data-testid='price-value'], .price__value")
+        addr = await self._safe_text(page, 'p[data-testid="location-address"], .location__address')
+        parsed = parse_endereco(addr) if addr else {}
 
-        iframe = page.locator('iframe[data-testid="map-iframe"]')
-        iframe_src = await iframe.get_attribute("src") if await iframe.count() > 0 else None
-        latitude, longitude = self._extract_coordinates(iframe_src)
-
-        nome_el = page.locator('a[data-testid="official-store-redirect-link"]').first
-        nome_anunciante = await nome_el.inner_text() if await nome_el.count() > 0 else None
-
-        # Extração das imagens (src, data-src, srcset)
-        img_selectors = [
-            ".olx-core-carousel__container img",
-            "ul.carousel-photos--wrapper img",
-            "img[property='image']",
-            "img[src*='resizedimgs.vivareal']"
-        ]
-        img_elements = []
-        for sel in img_selectors:
-            img_elements += await page.locator(sel).all()
-        img_urls = []
-        for img in img_elements:
-            src = await img.get_attribute("src")
-            data_src = await img.get_attribute("data-src")
-            srcset = await img.get_attribute("srcset")
-            url = src or data_src or srcset
-            if not url:
-                continue
-            # se srcset, pega a primeira url
-            if srcset:
-                url = srcset.split(",")[0].strip().split()[0]
-            # filtra urls inválidas ou placeholders
-            if "{description}" in url or url.endswith("{description}.webp"):
-                continue
-            img_urls.append(url)
-        # Remove duplicados
-        img_urls = list(dict.fromkeys(img_urls))
-
-        endereco_text = await self._safe_text(page, 'p.location-address__text[data-testid="location-address"]')
-        # parse address components (heuristic)
-        parsed = parse_endereco(endereco_text) if endereco_text else {"logradouro": None, "numero": None, "bairro": None, "municipio": None, "uf": None}
+        # MUDANÇA 3: Filtro melhorado para ignorar SVG (ícones) e pegar apenas JPG/WEBP
+        imgs = await page.locator("img").evaluate_all("""els => els
+            .map(e => e.src || e.getAttribute('data-src'))
+            .filter(src => src && (src.includes('vivareal') || src.includes('olx')) && !src.includes('icon') && !src.endsWith('.svg'))
+        """)
 
         return {
-            "nome_anunciante": nome_anunciante.strip() if nome_anunciante else None,
-            "tipo_transacao": await self._safe_text(page, "div.price-info__values-sale div.value-item:nth-of-type(1) .value-item__title, div.price-info__values-both div.value-item:nth-of-type(1) .value-item__title"),
-            "preco_venda": await self._safe_text(page, "div.value-item:nth-of-type(1) > p.value-item__value"),
-            "endereco": endereco_text,
-            "logradouro": parsed.get("logradouro"),
-            "numero": parsed.get("numero"),
-            "bairro": parsed.get("bairro"),
-            "municipio": parsed.get("municipio"),
-            "uf": parsed.get("uf"),
-            "metragem": parsed_features.get("metragem"),
-            "quartos": parsed_features.get("quartos"),
-            "banheiros": parsed_features.get("banheiros"),
-            "suites": parsed_features.get("suites"),
-            "vagas": parsed_features.get("vagas"),
-            "outros": json.dumps(parsed_features.get("outros", []), ensure_ascii=False),
-            "caracteristicas": caracteristicas_lista,
-            "latitude": latitude,
-            "longitude": longitude,
-            "condominio": await self._safe_text(page, '[data-testid="condoFee"]'),
+            "nome_anunciante": nome,
+            "tipo_transacao": "Venda",
+            "preco_venda": preco,
+            "endereco": addr,
+            "logradouro": parsed.get("logradouro"), "numero": parsed.get("numero"), "bairro": parsed.get("bairro"), "municipio": parsed.get("municipio"), "uf": parsed.get("uf"),
+            "metragem": feats.get("metragem"), "quartos": feats.get("quartos"), "banheiros": feats.get("banheiros"), "suites": feats.get("suites"), "vagas": feats.get("vagas"),
+            "outros": json.dumps(feats.get("outros", []), ensure_ascii=False), "caracteristicas": feats.get("caracteristicas"),
+            "latitude": None, "longitude": None,
+            "condominio": await self._safe_text(page, '[data-testid="condoFee"]'), 
             "iptu": await self._safe_text(page, '[data-testid="iptu"]'),
-            "qtd_imagens": len(img_urls),
-            "urls_imagens": "; ".join(img_urls),
-            "data_extracao": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "link": link,
+            "qtd_imagens": len(imgs), "urls_imagens": "; ".join(list(set(imgs))[:10]),
+            "data_extracao": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "link": link
         }
 
-    def _save_to_csv(self, data: Dict[str, Any]) -> None:
-        """Salva os dados extraídos no arquivo CSV, garantindo que urls_imagens fique entre aspas duplas."""
-        # Garante que urls_imagens seja string entre aspas duplas
-        if "urls_imagens" in data and isinstance(data["urls_imagens"], str):
-            data["urls_imagens"] = f'"{data["urls_imagens"]}"'
-        with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
+    def _save_to_csv(self, data):
+        if "urls_imagens" in data: data["urls_imagens"] = f'"{data["urls_imagens"]}"'
+        # MUDANÇA 4: encoding="utf-8-sig" aqui também para os appends
+        with open(self.csv_path, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=self.fields)
             writer.writerow(data)
 
-    async def scrape_link(self, link: str, timeout_ms: int = 60000, retries: int = 2, save_debug: bool = True) -> bool:
-        """Raspa os dados de um único anúncio e salva no CSV.
+    async def scrape_batch(self, links: List[str], save_debug: bool = True):
+        logger.info(f"🔥 Iniciando SESSÃO HEADFUL (XVFB) para {len(links)} links...")
         
-        Args:
-            link: URL do anúncio para extrair dados.
-            
-        Returns:
-            bool: True se sucesso, False se falha.
-        """
         async with async_playwright() as p:
             browser = await self._setup_browser(p)
             context = await self._setup_context(browser)
+            await Stealth().apply_stealth_async(context)
             page = await context.new_page()
 
-            # Selectors fallback: some listings use different templates
-            selectors = [
-                "div.details",
-                "main",
-                "div[data-testid='ad-detail']",
-                "section[data-testid='listing-details']",
-            ]
+            try:
+                await page.goto("https://www.vivareal.com.br/", timeout=60000)
+                await asyncio.sleep(5)
+            except: pass
 
-            attempt = 0
-            while attempt <= retries:
-                attempt += 1
+            for i, link in enumerate(links, 1):
+                logger.info(f"[{i}/{len(links)}] >> {link}")
                 try:
-                    await page.goto(url=link, timeout=timeout_ms)
-
-                    # wait for any of the possible selectors
-                    joined = ", ".join(selectors)
-                    await page.wait_for_selector(joined, timeout=timeout_ms)
-
+                    await page.goto(link, referer=page.url, timeout=90000, wait_until="domcontentloaded")
+                    await self._human_behavior(page)
+                    await page.wait_for_selector("body", timeout=30000)
+                    
                     data = await self._extract_data(page, link)
-                    self._save_to_csv(data)
+                    
+                    if not data['preco_venda'] and not data['endereco']:
+                        raise Exception("Dados vazios")
 
-                    logger.info(f"✅ Dados salvos para: {link}")
-                    await browser.close()
-                    return True
+                    self._save_to_csv(data)
+                    logger.info("✅ Dados extraídos com sucesso!")
+                    await asyncio.sleep(random.uniform(5, 10))
 
                 except Exception as e:
-                    # timeout or other issue
-                    logger.warning(f"Tentativa {attempt}/{retries+1} falhou para {link}: {e}")
+                    logger.warning(f"❌ Erro link {i}: {e}")
+                    await asyncio.sleep(5)
 
-                    if save_debug:
-                        # salva debug artifacts para investigação
-                        debug_dir = os.path.join("output", "debug")
-                        os.makedirs(debug_dir, exist_ok=True)
-                        safe_name = (link.replace("https://", "").replace("/", "_").replace("?", "_") )[:180]
-                        screenshot_path = os.path.join(debug_dir, f"{safe_name}_attempt{attempt}.png")
-                        html_path = os.path.join(debug_dir, f"{safe_name}_attempt{attempt}.html")
-                        try:
-                            await page.screenshot(path=screenshot_path, full_page=True)
-                            content = await page.content()
-                            with open(html_path, "w", encoding="utf-8") as fh:
-                                fh.write(content)
-                            logger.info(f"Debug salvo: {screenshot_path}, {html_path}")
-                        except Exception as dbg_e:
-                            logger.debug(f"Falha ao salvar debug artifacts: {dbg_e}")
+            await browser.close()
 
-                    # se não restarem tentativas, loga erro e fecha
-                    if attempt > retries:
-                        logger.error(f"❌ Erro ao raspar {link}: {e}")
-                        try:
-                            await browser.close()
-                        except Exception:
-                            pass
-                        return False
-
-                    # backoff breve antes de tentar novamente
-                    await asyncio.sleep(2 ** attempt)
-
-def run_scraper(link: str, csv_path: Optional[str] = None) -> None:
-    """Função auxiliar para executar o scraper em modo síncrono."""
-    scraper = VivaRealScraper(csv_path)
-    asyncio.run(scraper.scrape_link(link))
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    link = "https://www.vivareal.com.br/imoveis-lancamento/jardim-lobato-2778226554/?source=ranking%2Crp"
-    run_scraper(link)
+    async def scrape_link(self, link: str):
+        return await self.scrape_batch([link])

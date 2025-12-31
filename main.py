@@ -1,122 +1,93 @@
 import glob
 import os
-from google.cloud import storage
 import logging
 import asyncio
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from google.cloud import storage
+
 from viva_real.pipeline_full import run_full_pipeline
 from viva_real.captura_links_async import VivaRealLinkScraper
 from viva_real.scraper_async import VivaRealScraper
 
-# Configuração do logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 async def capturar_links_async(num_pages: int = 5, headless: bool = True, out_dir: str = "output", base_url: Optional[str] = None) -> str:
-    """Executa apenas a captura de links do VivaReal."""
-    links_dir = str(Path(out_dir) / "links")
+    links_path = Path(out_dir) / "links"
+    links_path.mkdir(parents=True, exist_ok=True)
+    links_dir = str(links_path)
     link_scraper = VivaRealLinkScraper(base_url=base_url, output_dir=links_dir, headless=headless)
     return await link_scraper.scrape_links(num_pages)
 
 async def extrair_dados_link_async(link: str, headless: bool = True, out_dir: str = "output") -> bool:
-    """Extrai dados de um único link do VivaReal."""
-    dados_dir = str(Path(out_dir) / "dados")
+    dados_path = Path(out_dir) / "dados"
+    dados_path.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d")
-    csv_path = str(Path(dados_dir) / f"{timestamp}_vivareal_single.csv")
-    
+    csv_path = str(dados_path / f"{timestamp}_vivareal_single.csv")
     scraper = VivaRealScraper(csv_path=csv_path, headless=headless)
     return await scraper.scrape_link(link)
 
 def upload_to_bucket(source_folder, bucket_name, destination_blob_folder):
-    """Sobe todo o conteúdo de output para o Bucket no GCS."""
     try:
+        if not bucket_name: return
         client = storage.Client()
         bucket = client.bucket(bucket_name)
-
-        # Pega todos os arquivos recursivamente
+        if not os.path.exists(source_folder): return
+        
         files = glob.glob(f"{source_folder}/**/*", recursive=True)
-
-        count = 0
-        print(f"\nIniciando upload para gs://{bucket_name}/{destination_blob_folder}...")
-
+        print(f"\n--- Upload Final para gs://{bucket_name}/{destination_blob_folder} ---")
         for file_path in files:
             if os.path.isfile(file_path):
-                # Mantém a estrutura de pastas (ex: links/arquivo.csv)
                 relative_path = os.path.relpath(file_path, source_folder)
                 blob_path = os.path.join(destination_blob_folder, relative_path)
-
-                blob = bucket.blob(blob_path)
-                blob.upload_from_filename(file_path)
-                print(f" - Upload: {relative_path}")
-                count += 1
-
-        print(f"Upload concluído! Total de arquivos: {count}")
+                try:
+                    bucket.blob(blob_path).upload_from_filename(file_path)
+                    print(f" [UPLOAD] {relative_path}")
+                except Exception as e:
+                    print(f" [ERRO] {relative_path}: {e}")
     except Exception as e:
-        print(f"ERRO ao fazer upload para o Bucket: {e}")
+        print(f"ERRO CRÍTICO NO UPLOAD: {e}")
 
 if __name__ == "__main__":
     import argparse
-    
-    parser = argparse.ArgumentParser(description="Pipeline de captura de dados do VivaReal")
-    parser.add_argument("--only-links", action="store_true", help="Executar apenas a captura de links")
-    parser.add_argument("--link", type=str, help="URL do imóvel para extrair dados")
-    parser.add_argument("--paginas", type=int, default=5, help="Número de páginas para capturar links (padrão: 5)")
-    parser.add_argument("--no-headless", action="store_true", help="Executar com UI do navegador para debug")
-    parser.add_argument("--out-dir", default="output", help="Diretório base para arquivos de saída")
-    parser.add_argument("--url-base", type=str, help="URL base para busca (ex: https://www.vivareal.com.br/venda/sp/sao-paulo/apartamento_residencial/)")
-    parser.add_argument("--bucket", type=str, help="Nome do Bucket GCS para salvar os resultados (ex: meu-bucket-vivareal)")
+    parser = argparse.ArgumentParser(description="Pipeline VivaReal")
+    parser.add_argument("--only-links", action="store_true")
+    parser.add_argument("--link", type=str)
+    parser.add_argument("--paginas", type=int, default=5)
+    parser.add_argument("--no-headless", action="store_true")
+    parser.add_argument("--out-dir", default="output")
+    parser.add_argument("--url-base", type=str)
+    parser.add_argument("--bucket", type=str)
+    # Novo argumento para limitar links e testar rápido
+    parser.add_argument("--limite-links", type=int, help="Limita a qtd de links processados")
     args = parser.parse_args()
-    
-    if args.link:
-        # Extrair dados de um único link
-        success = asyncio.run(extrair_dados_link_async(
-            link=args.link,
-            headless=not args.no_headless,
-            out_dir=args.out_dir
-        ))
-        if success:
-            print(f"\nExtração de dados do link concluída com sucesso!")
-            print(f"Dados salvos em: {args.out_dir}/dados/")
-        else:
-            print("\nFalha na extração de dados do link")
-            
-    elif args.only_links:
-        # Executar apenas captura de links
-        links_csv = asyncio.run(capturar_links_async(
-            num_pages=args.paginas,
-            headless=not args.no_headless,
-            out_dir=args.out_dir,
-            base_url=args.url_base
-        ))
-        if links_csv:
-            print(f"\nCaptura de links concluída com sucesso!")
-            print(f"Links salvos em: {links_csv}")
-        else:
-            print("\nFalha na captura de links")
-    else:
-        # Executar pipeline completo
-        links_csv, dados_csv = run_full_pipeline(
-            num_pages=args.paginas,
-            links_limit=None,
-            headless=not args.no_headless,
-            out_dir=args.out_dir,
-            base_url=args.url_base
-        )
-        
-        if links_csv and dados_csv:
-            print(f"\nPipeline concluído com sucesso!")
-            print(f"Links salvos em: {links_csv}")
-            print(f"Dados salvos em: {dados_csv}")
-        else:
-            print("\nFalha na execução do pipeline")
 
-    # Fazer upload para o Bucket se especificado
+    Path(args.out_dir).mkdir(parents=True, exist_ok=True)
+
+    # --- NOVO: Configura variável de ambiente Global ---
+    if args.bucket:
+        os.environ["GCS_BUCKET_NAME"] = args.bucket
+        print(f"Configurado bucket global: {args.bucket}")
+
+    try:
+        if args.link:
+            asyncio.run(extrair_dados_link_async(args.link, not args.no_headless, args.out_dir))
+        elif args.only_links:
+            asyncio.run(capturar_links_async(args.paginas, not args.no_headless, args.out_dir, args.url_base))
+        else:
+            run_full_pipeline(
+                num_pages=args.paginas,
+                links_limit=args.limite_links, # Passa o limite novo
+                headless=not args.no_headless,
+                out_dir=args.out_dir,
+                base_url=args.url_base
+            )
+    except Exception as e:
+        logger.error(f"ERRO FATAL: {e}")
+    finally:
         if args.bucket:
             folder_date = datetime.now().strftime("%Y%m%d_%H%M%S")
-            upload_to_bucket(
-                source_folder=args.out_dir,
-                bucket_name=args.bucket,
-                destination_blob_folder=f"execucao_{folder_date}"
-            )    
+            upload_to_bucket(args.out_dir, args.bucket, f"execucao_{folder_date}")
