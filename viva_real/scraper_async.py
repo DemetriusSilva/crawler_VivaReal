@@ -21,10 +21,8 @@ class VivaRealScraper:
         else:
             self.csv_path = csv_path
         self.headless = headless
-        
-        # Variáveis de ambiente
         self.bucket_name = os.environ.get("GCS_BUCKET_NAME")
-        self.execution_folder = os.environ.get("GCS_EXECUTION_FOLDER") # Nova variável
+        self.execution_folder = os.environ.get("GCS_EXECUTION_FOLDER")
 
         self.fields = [
             "nome_anunciante", "tipo_transacao", "preco_venda", "endereco",
@@ -43,38 +41,19 @@ class VivaRealScraper:
         os.makedirs(os.path.dirname(self.csv_path), exist_ok=True)
     
     def _upload_live_debug(self, file_path: str):
-        """Sobe arquivos para a pasta ESTRUTURADA da execução."""
         if not self.bucket_name or not self.execution_folder or not os.path.exists(file_path): return
         try:
             client = storage.Client()
             bucket = client.bucket(self.bucket_name)
-            
             filename = os.path.basename(file_path)
-            
-            # Define subpasta baseada no tipo de arquivo
-            if file_path.endswith(".csv"):
-                # Ex: execucao_2025.../dados/arquivo.csv
-                blob_name = f"{self.execution_folder}/dados/{filename}"
-            else:
-                # Ex: execucao_2025.../debug/foto.png
-                blob_name = f"{self.execution_folder}/debug/{filename}"
-            
+            blob_name = f"{self.execution_folder}/dados/{filename}" if file_path.endswith(".csv") else f"{self.execution_folder}/debug/{filename}"
             bucket.blob(blob_name).upload_from_filename(file_path)
-        except Exception as e:
-            pass # Silencioso para não travar processo
+        except: pass
 
     async def _setup_browser(self, playwright) -> Browser:
         return await playwright.chromium.launch(
             headless=self.headless, 
-            args=[
-                "--disable-blink-features=AutomationControlled", 
-                "--no-sandbox", 
-                "--disable-gpu", 
-                "--disable-dev-shm-usage", 
-                "--window-size=1920,1080", 
-                "--start-maximized",
-                "--ignore-certificate-errors"
-            ]
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--window-size=1920,1080", "--start-maximized", "--ignore-certificate-errors"]
         )
 
     async def _setup_context(self, browser: Browser) -> BrowserContext:
@@ -84,17 +63,12 @@ class VivaRealScraper:
             java_script_enabled=True,
             locale="pt-BR",
             timezone_id="America/Sao_Paulo",
-            extra_http_headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-User": "?1"
-            }
+            extra_http_headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8", "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7", "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-User": "?1"}
         )
 
     async def _human_behavior(self, page: Page):
         try:
-            try:
-                await page.locator("button:has-text('Aceitar'), button:has-text('Prosseguir'), #cookie-notifier-cta").click(timeout=2000)
+            try: await page.locator("button:has-text('Aceitar'), button:has-text('Prosseguir'), #cookie-notifier-cta").click(timeout=2000)
             except: pass
             await page.mouse.move(random.randint(100, 500), random.randint(100, 500), steps=20)
             await asyncio.sleep(0.5)
@@ -114,39 +88,28 @@ class VivaRealScraper:
                 if p(c): return els[i]
             return None
         return {
-            "metragem": _f(lambda x: "m²" in x or "m2" in x),
-            "quartos": _f(lambda x: "quarto" in x),
-            "banheiros": _f(lambda x: "banheiro" in x),
-            "suites": _f(lambda x: "suíte" in x or "suite" in x),
-            "vagas": _f(lambda x: "vaga" in x),
-            "outros": [c for c in els if "m²" not in c.lower() and "quarto" not in c.lower() and "banheiro" not in c.lower() and "vaga" not in c.lower()],
+            "metragem": _f(lambda x: "m²" in x or "m2" in x), "quartos": _f(lambda x: "quarto" in x),
+            "banheiros": _f(lambda x: "banheiro" in x), "suites": _f(lambda x: "suíte" in x or "suite" in x),
+            "vagas": _f(lambda x: "vaga" in x), "outros": [c for c in els if "m²" not in c.lower() and "quarto" not in c.lower() and "banheiro" not in c.lower() and "vaga" not in c.lower()],
             "caracteristicas": els
         }
 
     async def _extract_data(self, page: Page, link: str) -> Dict[str, Any]:
         feats = await self.extrair_caracteristicas(page)
-        
         nome = await self._safe_text(page, 'a[data-testid="official-store-redirect-link"], .publisher-name')
         preco = await self._safe_text(page, "div.price-info__values-sale .value-item__value, [data-testid='price-value'], .price__value")
         addr = await self._safe_text(page, 'p[data-testid="location-address"], .location__address')
         parsed = parse_endereco(addr) if addr else {}
-
-        imgs = await page.locator("img").evaluate_all("""els => els
-            .map(e => e.src || e.getAttribute('data-src'))
-            .filter(src => src && (src.includes('vivareal') || src.includes('olx')) && !src.includes('icon') && !src.endsWith('.svg'))
-        """)
+        imgs = await page.locator("img").evaluate_all("els => els.map(e => e.src || e.getAttribute('data-src')).filter(src => src && (src.includes('vivareal') || src.includes('olx')) && !src.includes('icon') && !src.endsWith('.svg'))")
 
         return {
-            "nome_anunciante": nome,
-            "tipo_transacao": "Venda",
-            "preco_venda": preco,
-            "endereco": addr,
-            "logradouro": parsed.get("logradouro"), "numero": parsed.get("numero"), "bairro": parsed.get("bairro"), "municipio": parsed.get("municipio"), "uf": parsed.get("uf"),
-            "metragem": feats.get("metragem"), "quartos": feats.get("quartos"), "banheiros": feats.get("banheiros"), "suites": feats.get("suites"), "vagas": feats.get("vagas"),
-            "outros": json.dumps(feats.get("outros", []), ensure_ascii=False), "caracteristicas": feats.get("caracteristicas"),
-            "latitude": None, "longitude": None,
-            "condominio": await self._safe_text(page, '[data-testid="condoFee"]'), 
-            "iptu": await self._safe_text(page, '[data-testid="iptu"]'),
+            "nome_anunciante": nome, "tipo_transacao": "Venda", "preco_venda": preco, "endereco": addr,
+            "logradouro": parsed.get("logradouro"), "numero": parsed.get("numero"), "bairro": parsed.get("bairro"),
+            "municipio": parsed.get("municipio"), "uf": parsed.get("uf"), "metragem": feats.get("metragem"),
+            "quartos": feats.get("quartos"), "banheiros": feats.get("banheiros"), "suites": feats.get("suites"),
+            "vagas": feats.get("vagas"), "outros": json.dumps(feats.get("outros", []), ensure_ascii=False),
+            "caracteristicas": feats.get("caracteristicas"), "latitude": None, "longitude": None,
+            "condominio": await self._safe_text(page, '[data-testid="condoFee"]'), "iptu": await self._safe_text(page, '[data-testid="iptu"]'),
             "qtd_imagens": len(imgs), "urls_imagens": "; ".join(list(set(imgs))[:15]),
             "data_extracao": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "link": link
         }
@@ -158,51 +121,60 @@ class VivaRealScraper:
             writer.writerow(data)
 
     async def scrape_batch(self, links: List[str], save_debug: bool = True):
-        logger.info(f"🔥 SESSÃO HEADFUL (XVFB) | Total links: {len(links)}")
-        
-        async with async_playwright() as p:
-            browser = await self._setup_browser(p)
-            context = await self._setup_context(browser)
-            await Stealth().apply_stealth_async(context)
-            page = await context.new_page()
+        # CONFIGURAÇÃO DO LOTE
+        BATCH_SIZE = 50 
+        logger.info(f"🔥 INICIANDO PROCESSAMENTO DE {len(links)} LINKS EM LOTES DE {BATCH_SIZE}...")
 
-            try:
-                await page.goto("https://www.vivareal.com.br/", timeout=60000)
-                await asyncio.sleep(5)
-            except: pass
+        # Divide a lista gigante em pedaços menores
+        chunks = [links[i:i + BATCH_SIZE] for i in range(0, len(links), BATCH_SIZE)]
 
-            for i, link in enumerate(links, 1):
-                logger.info(f"[{i}/{len(links)}] >> {link}")
+        for batch_idx, chunk in enumerate(chunks, 1):
+            logger.info(f"🔄 Iniciando Lote {batch_idx}/{len(chunks)} ({len(chunk)} links) - Reiniciando Sessão...")
+            
+            async with async_playwright() as p:
+                browser = await self._setup_browser(p)
+                context = await self._setup_context(browser)
+                await Stealth().apply_stealth_async(context)
+                page = await context.new_page()
+
+                # AQUECIMENTO DA SESSÃO NOVA
                 try:
-                    await page.goto(link, referer=page.url, timeout=90000, wait_until="domcontentloaded")
-                    await self._human_behavior(page)
-                    await page.wait_for_selector("body", timeout=30000)
-                    
-                    data = await self._extract_data(page, link)
-                    
-                    if not data['preco_venda'] and not data['endereco']:
-                        raise Exception("Dados vazios")
-
-                    self._save_to_csv(data)
-                    self._upload_live_debug(self.csv_path) # Upload para a pasta organizada
-                    
-                    logger.info("✅ Dados extraídos!")
-                    await asyncio.sleep(random.uniform(5, 10))
-
-                except Exception as e:
-                    logger.warning(f"❌ Erro: {e}")
-                    if save_debug:
-                        try:
-                            debug_dir = os.path.join("output", "debug")
-                            os.makedirs(debug_dir, exist_ok=True)
-                            safe_name = f"fail_{i}"
-                            path = f"{debug_dir}/{safe_name}.png"
-                            await page.screenshot(path=path, full_page=True)
-                            self._upload_live_debug(path) # Upload para a pasta organizada
-                        except: pass
+                    await page.goto("https://www.vivareal.com.br/", timeout=60000)
                     await asyncio.sleep(5)
+                except: pass
 
-            await browser.close()
+                # PROCESSA OS LINKS DO LOTE ATUAL
+                for i, link in enumerate(chunk, 1):
+                    global_idx = ((batch_idx - 1) * BATCH_SIZE) + i
+                    logger.info(f"[{global_idx}/{len(links)}] >> {link}")
+                    
+                    try:
+                        await page.goto(link, referer=page.url, timeout=60000, wait_until="domcontentloaded")
+                        await self._human_behavior(page)
+                        await page.wait_for_selector("body", timeout=30000)
+                        
+                        data = await self._extract_data(page, link)
+                        
+                        if not data['preco_venda'] and not data['endereco']:
+                            raise Exception("Dados vazios")
+
+                        self._save_to_csv(data)
+                        self._upload_live_debug(self.csv_path) # Salva incremental
+                        logger.info("✅ Dados extraídos!")
+                        
+                        await asyncio.sleep(random.uniform(3, 7)) # Pausa entre imóveis
+
+                    except Exception as e:
+                        logger.warning(f"❌ Erro: {e}")
+                        # Lógica de erro mantida...
+                        await asyncio.sleep(5)
+
+                logger.info(f"🏁 Fim do Lote {batch_idx}. Fechando navegador para limpeza.")
+                await browser.close()
+            
+            # PAUSA LONGA ENTRE LOTES (Sessões)
+            logger.info("💤 Pausa para troca de IP/Sessão...")
+            await asyncio.sleep(random.uniform(20, 40))
 
     async def scrape_link(self, link: str):
         return await self.scrape_batch([link])
