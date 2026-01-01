@@ -21,7 +21,10 @@ class VivaRealScraper:
         else:
             self.csv_path = csv_path
         self.headless = headless
+        
+        # Variáveis de ambiente
         self.bucket_name = os.environ.get("GCS_BUCKET_NAME")
+        self.execution_folder = os.environ.get("GCS_EXECUTION_FOLDER") # Nova variável
 
         self.fields = [
             "nome_anunciante", "tipo_transacao", "preco_venda", "endereco",
@@ -31,7 +34,6 @@ class VivaRealScraper:
         ]
         self._ensure_output_dir()
         
-        # MUDANÇA 1: encoding="utf-8-sig" para o Excel ler acentos corretamente
         if not os.path.exists(self.csv_path):
             with open(self.csv_path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.DictWriter(f, fieldnames=self.fields)
@@ -41,13 +43,25 @@ class VivaRealScraper:
         os.makedirs(os.path.dirname(self.csv_path), exist_ok=True)
     
     def _upload_live_debug(self, file_path: str):
-        if not self.bucket_name or not os.path.exists(file_path): return
+        """Sobe arquivos para a pasta ESTRUTURADA da execução."""
+        if not self.bucket_name or not self.execution_folder or not os.path.exists(file_path): return
         try:
             client = storage.Client()
             bucket = client.bucket(self.bucket_name)
-            blob_name = f"debug_live/{os.path.basename(file_path)}"
+            
+            filename = os.path.basename(file_path)
+            
+            # Define subpasta baseada no tipo de arquivo
+            if file_path.endswith(".csv"):
+                # Ex: execucao_2025.../dados/arquivo.csv
+                blob_name = f"{self.execution_folder}/dados/{filename}"
+            else:
+                # Ex: execucao_2025.../debug/foto.png
+                blob_name = f"{self.execution_folder}/debug/{filename}"
+            
             bucket.blob(blob_name).upload_from_filename(file_path)
-        except: pass
+        except Exception as e:
+            pass # Silencioso para não travar processo
 
     async def _setup_browser(self, playwright) -> Browser:
         return await playwright.chromium.launch(
@@ -80,7 +94,7 @@ class VivaRealScraper:
     async def _human_behavior(self, page: Page):
         try:
             try:
-                await page.locator("button:has-text('Aceitar'), button:has-text('Prosseguir')").click(timeout=2000)
+                await page.locator("button:has-text('Aceitar'), button:has-text('Prosseguir'), #cookie-notifier-cta").click(timeout=2000)
             except: pass
             await page.mouse.move(random.randint(100, 500), random.randint(100, 500), steps=20)
             await asyncio.sleep(0.5)
@@ -89,7 +103,6 @@ class VivaRealScraper:
 
     async def _safe_text(self, page, selector):
         el = page.locator(selector).first
-        # MUDANÇA 2: .strip() aqui ajuda a limpar espaços em branco extras (ex: quebras de linha no preço)
         text = await el.inner_text() if await el.count() > 0 else None
         return text.strip() if text else None
 
@@ -118,7 +131,6 @@ class VivaRealScraper:
         addr = await self._safe_text(page, 'p[data-testid="location-address"], .location__address')
         parsed = parse_endereco(addr) if addr else {}
 
-        # MUDANÇA 3: Filtro melhorado para ignorar SVG (ícones) e pegar apenas JPG/WEBP
         imgs = await page.locator("img").evaluate_all("""els => els
             .map(e => e.src || e.getAttribute('data-src'))
             .filter(src => src && (src.includes('vivareal') || src.includes('olx')) && !src.includes('icon') && !src.endsWith('.svg'))
@@ -135,19 +147,18 @@ class VivaRealScraper:
             "latitude": None, "longitude": None,
             "condominio": await self._safe_text(page, '[data-testid="condoFee"]'), 
             "iptu": await self._safe_text(page, '[data-testid="iptu"]'),
-            "qtd_imagens": len(imgs), "urls_imagens": "; ".join(list(set(imgs))[:10]),
+            "qtd_imagens": len(imgs), "urls_imagens": "; ".join(list(set(imgs))[:15]),
             "data_extracao": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "link": link
         }
 
     def _save_to_csv(self, data):
         if "urls_imagens" in data: data["urls_imagens"] = f'"{data["urls_imagens"]}"'
-        # MUDANÇA 4: encoding="utf-8-sig" aqui também para os appends
         with open(self.csv_path, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=self.fields)
             writer.writerow(data)
 
     async def scrape_batch(self, links: List[str], save_debug: bool = True):
-        logger.info(f"🔥 Iniciando SESSÃO HEADFUL (XVFB) para {len(links)} links...")
+        logger.info(f"🔥 SESSÃO HEADFUL (XVFB) | Total links: {len(links)}")
         
         async with async_playwright() as p:
             browser = await self._setup_browser(p)
@@ -173,11 +184,22 @@ class VivaRealScraper:
                         raise Exception("Dados vazios")
 
                     self._save_to_csv(data)
-                    logger.info("✅ Dados extraídos com sucesso!")
+                    self._upload_live_debug(self.csv_path) # Upload para a pasta organizada
+                    
+                    logger.info("✅ Dados extraídos!")
                     await asyncio.sleep(random.uniform(5, 10))
 
                 except Exception as e:
-                    logger.warning(f"❌ Erro link {i}: {e}")
+                    logger.warning(f"❌ Erro: {e}")
+                    if save_debug:
+                        try:
+                            debug_dir = os.path.join("output", "debug")
+                            os.makedirs(debug_dir, exist_ok=True)
+                            safe_name = f"fail_{i}"
+                            path = f"{debug_dir}/{safe_name}.png"
+                            await page.screenshot(path=path, full_page=True)
+                            self._upload_live_debug(path) # Upload para a pasta organizada
+                        except: pass
                     await asyncio.sleep(5)
 
             await browser.close()
