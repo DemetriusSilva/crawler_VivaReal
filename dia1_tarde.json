@@ -1,0 +1,18 @@
+{
+  "overrides": {
+    "containerOverrides": [
+      {
+        "args": [
+          "--paginas",
+          "20",
+          "--bucket",
+          "viva-real",
+          "--strategy",
+          "menor_preco"
+        ]
+      }
+    ],
+    "taskCount": 1,
+    "timeoutSeconds": 36000
+  }
+}
